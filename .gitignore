@@ -1,4 +1,4 @@
 /pwr
-basic_pvr_model.pt
+*.pt
 *.pdf
 *.pkl
