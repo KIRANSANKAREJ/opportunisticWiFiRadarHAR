@@ -41,11 +41,15 @@ def preprocess(pwr_path, visualize=False):
 
         pwr = PWR(file_path, start_time, end_time)
         ch1, ch2, ch3, activity = pwr.pwr_extract()
-        
-        dataDict['ch1'].append(ch1)
-        dataDict['ch2'].append(ch2)
-        dataDict['ch3'].append(ch3)
-        dataDict['activity'].extend(activity)
+
+        # Convert to NumPy for indexing
+        activity = np.array(activity)
+        mask = np.isin(activity, selectedActivities)
+
+        dataDict['ch1'].append(ch1[:, mask])
+        dataDict['ch2'].append(ch2[:, mask])
+        dataDict['ch3'].append(ch3[:, mask])
+        dataDict['activity'].extend(activity[mask])
         
         if visualize:
             pwr.vis_specs(ch1, ch2, ch3, f"images/{file[:-4]}.png")
@@ -145,6 +149,7 @@ def reorganize_images_by_label(src_dir="pwr_images", dst_dir="pwr_dataset"):
             label_dir = os.path.join(dst_dir, label)
             os.makedirs(label_dir, exist_ok=True)
             shutil.move(os.path.join(src_dir, img_file), os.path.join(label_dir, img_file))
+    os.rmdir(os.path.join(cwd, src_dir))
 
 
 # Data loading

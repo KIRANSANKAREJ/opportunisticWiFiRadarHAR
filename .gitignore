@@ -4,3 +4,4 @@
 *.pkl
 /__pycache__
 /images
+/pwr_dataset
