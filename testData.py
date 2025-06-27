@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import os
 from tqdm import tqdm
+from plot_pwr_spectrogram import PWR
 
 cwd = os.getcwd()
 pwr_path = os.path.join(cwd, "pwr")
@@ -80,3 +81,14 @@ def getData(path=pwr_path, force_reload=False):
 
 # room_no = data.iloc[0]['room_no']
 # print(f"\n\n\nRoom ID : {room_no}\n\n\n")
+
+
+# filepath = os.path.join(pwr_path, "PWR_exp_002.mat")
+# pwr = scipy.io.loadmat(filepath)['PWR']
+
+# # Flattening to extract column list
+# columns = [item[0] for item in pwr[0]]
+
+# # Making a DataFrame for readability
+# df = pd.DataFrame(data=pwr[1:], columns=columns)
+# print(df.iloc[0])

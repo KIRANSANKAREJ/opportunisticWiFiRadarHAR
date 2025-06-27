@@ -3,3 +3,4 @@
 *.pdf
 *.pkl
 /__pycache__
+/images
