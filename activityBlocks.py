@@ -72,7 +72,7 @@ def segment_activity_blocks(dataDict):
 
     for i in range(1, len(activity)):
         if activity[i] != current_activity:
-            # End of current block
+            
             block = {
                 'activity': current_activity,
                 'ch1': ch1[start_idx:i],
@@ -80,11 +80,10 @@ def segment_activity_blocks(dataDict):
                 'ch3': ch3[start_idx:i]
             }
             blocks.append(block)
-            # Start a new block
+            
             current_activity = activity[i]
             start_idx = i
 
-    # Add the final block
     blocks.append({
         'activity': current_activity,
         'ch1': ch1[start_idx:],
@@ -99,16 +98,16 @@ def blocks_to_images(blocks):
     image_blocks = []
 
     for block in tqdm(blocks, desc="Preprocessing for images..."):
-        ch1_img = block['ch1'].T  # shape: (100, segment_length)
+        ch1_img = block['ch1'].T
         ch2_img = block['ch2'].T
         ch3_img = block['ch3'].T
 
-        # Stack to (3, 100, segment_length)
+        
         image = np.stack([ch1_img, ch2_img, ch3_img], axis=0)
 
         image_blocks.append({
             'activity': block['activity'],
-            'image': image  # shape: (3, 100, segment_length)
+            'image': image
         })
 
     return image_blocks
@@ -120,17 +119,17 @@ def save_blocks_as_png(image_blocks, save_dir="pwr_images"):
     for i, block in tqdm(enumerate(image_blocks), desc="Creating Images..."):
         img = block['image']  # shape: (3, 100, W)
 
-        # Normalize each channel separately to 0–255
+        # Normalize to 0-255
         img_norm = []
         for channel in img:
             ch_min, ch_max = channel.min(), channel.max()
             ch_scaled = (channel - ch_min) / (ch_max - ch_min + 1e-8) * 255
             img_norm.append(ch_scaled.astype(np.uint8))
 
-        # Stack normalized channels
+        
         img_uint8 = np.stack(img_norm, axis=0)  # shape: (3, 100, W)
 
-        # Convert to (H, W, 3) for saving
+        
         img_uint8 = np.transpose(img_uint8, (1, 2, 0))  # (100, W, 3)
 
         # Save using PIL
