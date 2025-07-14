@@ -68,7 +68,7 @@ def train_model(model, train_loader, optimizer, criterion, epochs=20, device="cu
         print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
 
     # Save model after training
-    torch.save(model.state_dict(), "basic_pvr_model.pt")
+    torch.save(model.state_dict(), "model pt files/basic_pvr_model.pt")
     print("Model saved to 'basic_pvr_model.pt'")
 
 
@@ -100,7 +100,7 @@ def evaluate_model(model, test_loader, label_names, device="cuda"):
     plt.ylabel("True Label")
     plt.title("Confusion Matrix Heatmap")
     plt.tight_layout()
-    plt.savefig("Confusion Matrix.png")
+    plt.savefig("output_images/Confusion Matrix.png")
     plt.show()
 
 
@@ -111,8 +111,8 @@ print('Using device:', torch.cuda.get_device_name(0))
 # Train-test split
 try:
     print("Checking for existing train and test splits...")
-    train_df = pd.read_pickle("train_df.pkl")
-    test_df = pd.read_pickle("test_df.pkl")
+    train_df = pd.read_pickle("pkl files/train_df.pkl")
+    test_df = pd.read_pickle("pkl files/test_df.pkl")
     print("Loaded pre-existing pkl files...")
 except:
     print("No pre-existing data found...")
@@ -124,8 +124,8 @@ except:
         random_state=2555304, 
         stratify=df['activity']
         )
-    train_df.to_pickle("train_df.pkl")
-    test_df.to_pickle("test_df.pkl")
+    train_df.to_pickle("pkl files/train_df.pkl")
+    test_df.to_pickle("pkl files/test_df.pkl")
 
 train_dataset = PWRDataset(train_df)
 test_dataset = PWRDataset(test_df)
@@ -140,7 +140,7 @@ criterion = nn.CrossEntropyLoss()
 
 try:
     print("Checking for previous training...")
-    model.load_state_dict(torch.load("basic_pvr_model.pt", weights_only=True))
+    model.load_state_dict(torch.load("model pt files/basic_pvr_model.pt", weights_only=True))
     print("State dictionary loaded...")
 except:
     print("No saved model found, initializing training...")

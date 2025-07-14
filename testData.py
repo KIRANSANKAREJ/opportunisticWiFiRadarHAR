@@ -11,15 +11,17 @@ pwr_path = os.path.join(cwd, "pwr")
 def getData(path=pwr_path, force_reload=False):
     frames = []
     selectedActivities = [
-        'walk',
+        'bodyrotate',
+        'liedown',
+        'noactivity',
         'sit',
         'stand',
-        'liedown',
-        'standfromlie',        
+        'standfromlie',
+        'walk'
     ]
     try:
         print("Checking for raw data...")
-        raw_data = pd.read_pickle("raw_data.pkl")
+        raw_data = pd.read_pickle("pkl files/raw_data.pkl")
         if force_reload:
             raise Exception("Force Reload is True.")
         else:
@@ -61,7 +63,7 @@ def getData(path=pwr_path, force_reload=False):
                 )
         print(f"\n\n\nColumns : {columns}\n\n\n")
         raw_data = pd.concat(frames)
-        raw_data.to_pickle("raw_data.pkl")
+        raw_data.to_pickle("pkl files/raw_data.pkl")
     finally:
         return raw_data
 

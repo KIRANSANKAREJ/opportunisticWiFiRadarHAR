@@ -128,7 +128,7 @@ for epoch in range(15):
         total_loss += loss.item()
     print(f"Epoch {epoch+1}: Loss = {total_loss / len(train_loader):.4f}")
 
-torch.save(model.state_dict(), "resnet18_pwr.pt")
+torch.save(model.state_dict(), "model pt files/resnet18_pwr.pt")
 
 model.eval()
 all_preds, all_labels = [], []
@@ -160,6 +160,6 @@ plt.xlabel("Predicted")
 plt.ylabel("True")
 plt.title("Confusion Matrix (Normalized)")
 plt.tight_layout()
-plt.savefig("confusion_matrix_resnet18_RGB.png")
+plt.savefig("output_images/confusion_matrix_resnet18_RGB.png")
 plt.show()
 

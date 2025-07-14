@@ -153,12 +153,12 @@ def reorganize_images_by_label(src_dir="pwr_images", dst_dir="pwr_dataset"):
 
 # Data loading
 try:
-    with open("activityDict.pkl", "rb") as file:
+    with open("pkl files/activityDict.pkl", "rb") as file:
         dataDict = pickle.load(file)
     print("Loaded Pickle data...")
 except:
     dataDict = preprocess(pwr_path)
-    with open("activityDict.pkl", "wb") as file:
+    with open("pkl files/activityDict.pkl", "wb") as file:
         pickle.dump(dataDict, file)
     print("Preprocessing completed, pickle file created...")
 
