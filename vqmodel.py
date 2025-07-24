@@ -30,7 +30,7 @@ class VectorQuantizer(nn.Module):
 
         # Straight Through Estimator
         z_q = z_e + (z_q - z_e).detach()
-        return z_q, vq_loss, indices
+        return z_q, codebook_loss, commitment_loss, vq_loss, indices
 
 class Encoder(nn.Module):
     def __init__(self, in_channels):
@@ -68,7 +68,7 @@ class VQVAE(nn.Module):
     def forward(self, x):
         z_e = self.encoder(x)
 
-        z_q, vq_loss, indices = self.quantizer(z_e)
+        z_q, codebook_loss, commitment_loss, vq_loss, indices = self.quantizer(z_e)
         x_recon = self.decoder(z_q)
         recon_loss = F.mse_loss(x_recon, x)
         total_loss = recon_loss + vq_loss
@@ -76,11 +76,32 @@ class VQVAE(nn.Module):
             "recon_x": x_recon,
             "total_loss": total_loss,
             "recon_loss": recon_loss,
+            "codebook_loss": codebook_loss,
+            "commitment_loss": commitment_loss,
             "vq_loss": vq_loss,
             "z_q": z_q,
             "indices": indices
         }
-    
+
+
+def compute_perplexity(indices, num_embeddings):
+    """
+    indices: Tensor or array of shape (N,) — codebook indices used during a batch/epoch.
+    num_embeddings: Total number of codebook vectors.
+    """
+    if isinstance(indices, torch.Tensor):
+        indices = indices.detach().cpu().numpy()
+
+    # Histogram of code usage
+    counts = np.bincount(indices, minlength=num_embeddings).astype(np.float32)
+    probs = counts / counts.sum()
+
+    # Mask out zero probabilities to avoid log(0)
+    nonzero_probs = probs[probs > 0]
+    entropy = -np.sum(nonzero_probs * np.log(nonzero_probs + 1e-10))
+    perplexity = np.exp(entropy)
+    return perplexity
+
 
 class ChunkImageDataset(Dataset):
     def __init__(self, chunks, transform=None):
