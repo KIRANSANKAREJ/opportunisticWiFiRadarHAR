@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 class VectorQuantizer(nn.Module):
-    def __init__(self, num_embeddings=512, embedding_dim=128, beta=1.0):
+    def __init__(self, num_embeddings=512, embedding_dim=128, beta=0.25):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
@@ -36,10 +36,11 @@ class Encoder(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
         self.model = nn.Sequential(
-            nn.Conv2d(in_channels, 64, 4, 2, 1), nn.ReLU(),
-            nn.Conv2d(64, 128, 4, 2, 1), nn.ReLU(),
-            nn.Conv2d(128, 128, 3, 1, 1)
+            nn.Conv2d(in_channels, 64, kernel_size=4, stride=(2, 2), padding=1), nn.ReLU(),   # 200×30 → 100×15
+            nn.Conv2d(64, 128, kernel_size=4, stride=(2, 1), padding=1), nn.ReLU(),           # 100×15 → 50×15
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1)                           # keep 50×15
         )
+
     def forward(self, x):
         return self.model(x)
 
@@ -48,11 +49,12 @@ class Decoder(nn.Module):
     def __init__(self, embedding_dim):
         super().__init__()
         self.model = nn.Sequential(
-            nn.Conv2d(embedding_dim, 128, 3, 1, 1), nn.ReLU(),
-            nn.ConvTranspose2d(128, 64, 4, 2, 1), nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 4, 2, 1), nn.ReLU(),
-            nn.Conv2d(32, 1, 3, 1, 1)
+            nn.Conv2d(embedding_dim, 128, kernel_size=3, stride=1, padding=1), nn.ReLU(),      # 50×15
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=(2, 1), padding=1), nn.ReLU(),   # 100×15
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=(2, 2), padding=1), nn.ReLU(),    # 200×30
+            nn.Conv2d(32, 1, kernel_size=3, stride=1, padding=1)                               # Final: 200×30
         )
+
     def forward(self, x):
         return self.model(x)
 
