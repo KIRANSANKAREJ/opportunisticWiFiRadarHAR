@@ -3,6 +3,87 @@ import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import Dataset
+from collections import deque, defaultdict
+import matplotlib.pyplot as plt
+import math
+
+
+class VectorQuantizerEMA(nn.Module):
+    def __init__(self, num_embeddings, embedding_dim, decay=0.99, eps=1e-5, cosine_assign=False, beta=0.25):
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.decay = decay
+        self.eps = eps
+        self.cosine_assign = cosine_assign
+        self.beta = beta  # commitment weight
+
+        self.embedding = nn.Embedding(num_embeddings, embedding_dim)
+        self.embedding.weight.data.uniform_(-1.0/num_embeddings, 1.0/num_embeddings)
+
+        # EMA buffers
+        self.register_buffer("ema_cluster_size", torch.zeros(num_embeddings))
+        self.register_buffer("ema_w", torch.zeros(num_embeddings, embedding_dim))
+
+    @torch.no_grad()
+    def _ema_update(self, z_e_flat, indices):
+        # one-hot assignments
+        N = z_e_flat.shape[0]
+        one_hot = F.one_hot(indices, self.num_embeddings).type_as(z_e_flat)  # (N,K)
+
+        # batch stats
+        cluster_size = one_hot.sum(0)  # (K,)
+        embed_sums = one_hot.t() @ z_e_flat  # (K,D)
+
+        # ema updates
+        self.ema_cluster_size.mul_(self.decay).add_(cluster_size, alpha=1 - self.decay)
+        self.ema_w.mul_(self.decay).add_(embed_sums, alpha=1 - self.decay)
+
+        # Laplace smoothing to avoid NaNs
+        n = self.ema_cluster_size.sum()
+        smoothed = (self.ema_cluster_size + self.eps) / (n + self.num_embeddings * self.eps) * n
+
+        # normalize centers
+        self.embedding.weight.data.copy_(self.ema_w / smoothed.unsqueeze(1))
+
+    def forward(self, z_e):
+        # z_e: (B,C,H,W)
+        B, C, H, W = z_e.shape
+        z = z_e.permute(0,2,3,1).contiguous().view(-1, C)  # (N, D)
+
+        # assignment
+        E = self.embedding.weight  # (K, D)
+
+        if self.cosine_assign:
+            z_n = F.normalize(z, dim=1)
+            E_n = F.normalize(E, dim=1)
+            indices = torch.argmax(z_n @ E_n.t(), dim=1)
+        else:
+            # squared L2 via dot trick
+            z2 = (z*z).sum(dim=1, keepdim=True)    # (N,1)
+            e2 = (E*E).sum(dim=1, keepdim=True).t()# (1,K)
+            d = z2 + e2 - 2.0 * (z @ E.t())        # (N,K)
+            indices = torch.argmin(d, dim=1)
+
+        z_q = F.embedding(indices, E)             # (N, D)
+        z_q = z_q.view(B, H, W, C).permute(0,3,1,2).contiguous()
+
+        # EMA codebook update (no grad) using flattened z
+        self._ema_update(z.detach().view(-1, C), indices.detach())
+
+        # losses: commit only (codebook is updated via EMA)
+        commit = self.beta * F.mse_loss(z_q.detach(), z_e)
+        # straight-through
+        z_q = z_e + (z_q - z_e).detach()
+
+        vq_loss = commit   # keep key 'vq_loss' for your caller
+        codebook_loss = torch.zeros((), device=z_e.device)
+        commitment_loss = commit
+
+        indices_out = indices.view(B, H, W)
+        return z_q, codebook_loss, commitment_loss, vq_loss, indices_out
+
+
 
 class VectorQuantizer(nn.Module):
     def __init__(self, num_embeddings=512, embedding_dim=128, beta=0.25):
@@ -31,6 +112,11 @@ class VectorQuantizer(nn.Module):
         # Straight Through Estimator
         z_q = z_e + (z_q - z_e).detach()
         return z_q, codebook_loss, commitment_loss, vq_loss, indices
+
+    def set_codebook(self, new_weights):
+        with torch.no_grad():
+            self.embedding.weight.copy_(new_weights)
+
 
 class Encoder(nn.Module):
     def __init__(self, in_channels):
@@ -64,13 +150,23 @@ class VQVAE(nn.Module):
     def __init__(self, in_channels=1, embedding_dim=128, num_embeddings=512, beta=0.25):
         super().__init__()
         self.encoder = Encoder(in_channels)
-        self.quantizer = VectorQuantizer(num_embeddings, embedding_dim, beta)
+        self.quantizer = VectorQuantizerEMA(num_embeddings, embedding_dim, beta)
         self.decoder = Decoder(embedding_dim)
 
-    def forward(self, x):
+    def forward(self, x, quantize=True):
         z_e = self.encoder(x)
 
-        z_q, codebook_loss, commitment_loss, vq_loss, indices = self.quantizer(z_e)
+        if quantize:
+            z_q, codebook_loss, commitment_loss, vq_loss, indices = self.quantizer(z_e)
+        else:
+            z_q = z_e
+            indices = torch.zeros(z_e.shape[0], dtype=torch.long, device=z_e.device)
+            codebook_loss = commitment_loss = torch.tensor(0.0, device=z_e.device)
+            vq_loss = 0
+        
+        if vq_loss == 0:
+            vq_loss = commitment_loss + codebook_loss
+
         x_recon = self.decoder(z_q)
         recon_loss = F.mse_loss(x_recon, x)
         total_loss = recon_loss + vq_loss
