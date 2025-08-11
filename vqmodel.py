@@ -122,13 +122,23 @@ class Encoder(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
         self.model = nn.Sequential(
-            nn.Conv2d(in_channels, 64, kernel_size=4, stride=(2, 2), padding=1), nn.ReLU(),   # 200×30 → 100×15
-            nn.Conv2d(64, 128, kernel_size=4, stride=(2, 1), padding=1), nn.ReLU(),           # 100×15 → 50×15
-            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1)                           # keep 50×15
+            nn.Conv2d(in_channels, 64, kernel_size=4, stride=(2, 2), padding=1),
+            nn.ReLU(),
+            nn.Dropout2d(0.1),  # light dropout early to not destroy low-level features
+
+            nn.Conv2d(64, 128, kernel_size=4, stride=(2, 1), padding=1),
+            nn.ReLU(),
+            nn.Dropout2d(0.2),  # stronger dropout mid-level
+
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Dropout2d(0.3)   # heaviest dropout before quantization
         )
 
     def forward(self, x):
         return self.model(x)
+
+
 
 
 class Decoder(nn.Module):
@@ -147,29 +157,52 @@ class Decoder(nn.Module):
     
 
 class VQVAE(nn.Module):
-    def __init__(self, in_channels=1, embedding_dim=128, num_embeddings=512, beta=0.25):
+    def __init__(self, in_channels=1, embedding_dim=32, num_embeddings=512, beta=0.25,
+                 decay=0.99, cosine_assign=True):
         super().__init__()
-        self.encoder = Encoder(in_channels)
-        self.quantizer = VectorQuantizerEMA(num_embeddings, embedding_dim, beta)
-        self.decoder = Decoder(embedding_dim)
+        self.encoder = Encoder(in_channels)          # outputs C_enc=128 in your file
+        C_enc = 128                                  # <- last conv of Encoder uses 128
+
+        # map encoder channels -> embedding_dim for the quantizer
+        self.quant_proj = nn.Conv2d(C_enc, embedding_dim, kernel_size=1)
+        self.quant_ln = nn.LayerNorm(embedding_dim)
+
+        # EMA quantizer (make sure args are in the right slots!)
+        self.quantizer = VectorQuantizerEMA(
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+            decay=decay,
+            eps=1e-5,
+            cosine_assign=cosine_assign,
+            beta=beta
+        )
+
+        self.decoder = Decoder(embedding_dim)        # your Decoder already takes embedding_dim
 
     def forward(self, x, quantize=True):
-        z_e = self.encoder(x)
+        z_e = self.encoder(x)                        # (B, C_enc, H, W)
+        z_e = self.quant_proj(z_e)                   # (B, embedding_dim, H, W)
+
+        # apply LN over channel dim (B,C,H,W) → (BHW,C) → LN → back
+        B, C, H, W = z_e.shape
+        z_flat = z_e.permute(0, 2, 3, 1).reshape(-1, C)
+        z_flat = self.quant_ln(z_flat)
+        z_e = z_flat.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
 
         if quantize:
             z_q, codebook_loss, commitment_loss, vq_loss, indices = self.quantizer(z_e)
         else:
+            # warm-up / no-quant path: return zeros as 0-D tensors and indices=None
             z_q = z_e
-            indices = torch.zeros(z_e.shape[0], dtype=torch.long, device=z_e.device)
-            codebook_loss = commitment_loss = torch.tensor(0.0, device=z_e.device)
-            vq_loss = 0
-        
-        if vq_loss == 0:
-            vq_loss = commitment_loss + codebook_loss
+            indices = None
+            codebook_loss   = torch.zeros((), device=z_e.device)
+            commitment_loss = torch.zeros((), device=z_e.device)
+            vq_loss         = torch.zeros((), device=z_e.device)
 
         x_recon = self.decoder(z_q)
         recon_loss = F.mse_loss(x_recon, x)
         total_loss = recon_loss + vq_loss
+
         return {
             "recon_x": x_recon,
             "total_loss": total_loss,
@@ -178,7 +211,7 @@ class VQVAE(nn.Module):
             "commitment_loss": commitment_loss,
             "vq_loss": vq_loss,
             "z_q": z_q,
-            "indices": indices
+            "indices": indices,
         }
 
 
