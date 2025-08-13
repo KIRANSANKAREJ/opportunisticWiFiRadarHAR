@@ -142,13 +142,13 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, embedding_dim):
+    def __init__(self, embedding_dim, in_channels=1):
         super().__init__()
         self.model = nn.Sequential(
             nn.Conv2d(embedding_dim, 128, kernel_size=3, stride=1, padding=1), nn.ReLU(),      # 50×15
             nn.ConvTranspose2d(128, 64, kernel_size=4, stride=(2, 1), padding=1), nn.ReLU(),   # 100×15
             nn.ConvTranspose2d(64, 32, kernel_size=4, stride=(2, 2), padding=1), nn.ReLU(),    # 200×30
-            nn.Conv2d(32, 1, kernel_size=3, stride=1, padding=1)                               # Final: 200×30
+            nn.Conv2d(32, in_channels, kernel_size=3, stride=1, padding=1)                               # Final: 200×30
         )
 
     def forward(self, x):
@@ -177,7 +177,7 @@ class VQVAE(nn.Module):
             beta=beta
         )
 
-        self.decoder = Decoder(embedding_dim)        # your Decoder already takes embedding_dim
+        self.decoder = Decoder(embedding_dim, in_channels)        # your Decoder already takes embedding_dim
 
     def forward(self, x, quantize=True):
         z_e = self.encoder(x)                        # (B, C_enc, H, W)
@@ -234,28 +234,63 @@ def compute_perplexity(indices, num_embeddings):
     return perplexity
 
 
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
 class ChunkImageDataset(Dataset):
-    def __init__(self, chunks, transform=None):
+    """
+    Expects each df in `chunks` to have columns:
+      - 'PWR_ch1' (list/array length T of 200-dim vectors)
+      - optionally 'PWR_ch2', 'PWR_ch3' for extra modalities
+    Produces tensor of shape (C, 200, T), where C = in_channels.
+    """
+    def __init__(self, chunks, in_channels=1, transform=None):
+        assert in_channels in (1, 2, 3), "in_channels must be 1, 2, or 3"
+        self.in_channels = in_channels
         self.data = []
+        self.transform = transform
+
+        # pick which columns to read based on in_channels
+        cols = ["PWR_ch1"]
+        if in_channels >= 2: cols.append("PWR_ch2")
+        if in_channels >= 3: cols.append("PWR_ch3")
 
         for df in chunks:
-            image = np.stack(df['PWR_ch1'].to_list(), axis=1)
-            self.data.append(image.astype(np.float32))
+            chans = []
+            for c in cols:
+                if c in df.columns:
+                    # stack time along axis=1 to get (200, T)
+                    arr = np.stack(df[c].to_list(), axis=1).astype(np.float32)
+                else:
+                    # fallback: zero channel if missing
+                    # shape must match first channel time length
+                    if len(chans) > 0:
+                        T = chans[0].shape[1]
+                    else:
+                        # infer T from PWR_ch1
+                        base = np.stack(df["PWR_ch1"].to_list(), axis=1).astype(np.float32)
+                        T = base.shape[1]
+                    arr = np.zeros((200, T), dtype=np.float32)
+                chans.append(arr)
 
-        self.transform = transform
-    
+            # (C, 200, T)
+            img = np.stack(chans, axis=0)
+            self.data.append(img)
+
     def __len__(self):
         return len(self.data)
-    
+
     def __getitem__(self, idx):
-        img = self.data[idx]  # shape: (200, 80)
-        img_tensor = torch.tensor(img, dtype=torch.float32)
+        x = torch.from_numpy(self.data[idx])  # (C, 200, T), float32
 
-        # Normalize per image
-        mean = img_tensor.mean()
-        std = img_tensor.std()
-        if std < 1e-6:
-            std = 1.0  # prevent division by zero
+        # per-sample, per-channel z-score
+        # keepdims for broadcasting over (200, T)
+        mean = x.mean(dim=(1,2), keepdim=True)
+        std  = x.std(dim=(1,2), keepdim=True)
+        std  = torch.where(std < 1e-6, torch.ones_like(std), std)
+        x = (x - mean) / std
 
-        img_tensor = (img_tensor - mean) / std
-        return img_tensor.unsqueeze(0)  # (1, 200, 80)
+        if self.transform is not None:
+            x = self.transform(x)
+        return x
