@@ -5,3 +5,7 @@
 /__pycache__
 /images
 /pwr_dataset
+*.pyc
+/processed_data_pwr_wifi/__pycache__
+/processed_data_pwr_wifi/data
+*.csv

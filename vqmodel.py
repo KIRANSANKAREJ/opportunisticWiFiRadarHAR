@@ -197,8 +197,8 @@ class ChunkImageDataset(Dataset):
 
         # per-sample, per-channel z-score
         mean = x.mean(dim=(1, 2), keepdim=True)
-        std  = x.std(dim=(1, 2), keepdim=True, unbiased=False)  # <- change 1
-        x = (x - mean) / (std + 1e-8)                           # <- change 2
+        std  = x.std(dim=(1, 2), keepdim=True, unbiased=False)
+        x = (x - mean) / (std + 1e-8)                           
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
         if self.transform is not None:
