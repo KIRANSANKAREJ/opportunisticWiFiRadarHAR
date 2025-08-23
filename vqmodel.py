@@ -8,83 +8,6 @@ import matplotlib.pyplot as plt
 import math
 
 
-class VectorQuantizerEMA(nn.Module):
-    def __init__(self, num_embeddings, embedding_dim, decay=0.99, eps=1e-5, cosine_assign=False, beta=0.25):
-        super().__init__()
-        self.num_embeddings = num_embeddings
-        self.embedding_dim = embedding_dim
-        self.decay = decay
-        self.eps = eps
-        self.cosine_assign = cosine_assign
-        self.beta = beta  # commitment weight
-
-        self.embedding = nn.Embedding(num_embeddings, embedding_dim)
-        self.embedding.weight.data.uniform_(-1.0/num_embeddings, 1.0/num_embeddings)
-
-        # EMA buffers
-        self.register_buffer("ema_cluster_size", torch.zeros(num_embeddings))
-        self.register_buffer("ema_w", torch.zeros(num_embeddings, embedding_dim))
-
-    @torch.no_grad()
-    def _ema_update(self, z_e_flat, indices):
-        # one-hot assignments
-        N = z_e_flat.shape[0]
-        one_hot = F.one_hot(indices, self.num_embeddings).type_as(z_e_flat)  # (N,K)
-
-        # batch stats
-        cluster_size = one_hot.sum(0)  # (K,)
-        embed_sums = one_hot.t() @ z_e_flat  # (K,D)
-
-        # ema updates
-        self.ema_cluster_size.mul_(self.decay).add_(cluster_size, alpha=1 - self.decay)
-        self.ema_w.mul_(self.decay).add_(embed_sums, alpha=1 - self.decay)
-
-        # Laplace smoothing to avoid NaNs
-        n = self.ema_cluster_size.sum()
-        smoothed = (self.ema_cluster_size + self.eps) / (n + self.num_embeddings * self.eps) * n
-
-        # normalize centers
-        self.embedding.weight.data.copy_(self.ema_w / smoothed.unsqueeze(1))
-
-    def forward(self, z_e):
-        # z_e: (B,C,H,W)
-        B, C, H, W = z_e.shape
-        z = z_e.permute(0,2,3,1).contiguous().view(-1, C)  # (N, D)
-
-        # assignment
-        E = self.embedding.weight  # (K, D)
-
-        if self.cosine_assign:
-            z_n = F.normalize(z, dim=1)
-            E_n = F.normalize(E, dim=1)
-            indices = torch.argmax(z_n @ E_n.t(), dim=1)
-        else:
-            # squared L2 via dot trick
-            z2 = (z*z).sum(dim=1, keepdim=True)    # (N,1)
-            e2 = (E*E).sum(dim=1, keepdim=True).t()# (1,K)
-            d = z2 + e2 - 2.0 * (z @ E.t())        # (N,K)
-            indices = torch.argmin(d, dim=1)
-
-        z_q = F.embedding(indices, E)             # (N, D)
-        z_q = z_q.view(B, H, W, C).permute(0,3,1,2).contiguous()
-
-        # EMA codebook update (no grad) using flattened z
-        self._ema_update(z.detach().view(-1, C), indices.detach())
-
-        # losses: commit only (codebook is updated via EMA)
-        commit = self.beta * F.mse_loss(z_q.detach(), z_e)
-        # straight-through
-        z_q = z_e + (z_q - z_e).detach()
-
-        vq_loss = commit   # keep key 'vq_loss' for your caller
-        codebook_loss = torch.zeros((), device=z_e.device)
-        commitment_loss = commit
-
-        indices_out = indices.view(B, H, W)
-        return z_q, codebook_loss, commitment_loss, vq_loss, indices_out
-
-
-
 class VectorQuantizer(nn.Module):
     def __init__(self, num_embeddings=512, embedding_dim=128, beta=0.25):
         super().__init__()
@@ -98,18 +21,22 @@ class VectorQuantizer(nn.Module):
     def forward(self, z_e):
         B, C, H, W = z_e.shape
         z_e_flat = z_e.permute(0, 2, 3, 1).reshape(-1, C)
+
+        # Compute distances to codebook vectors
         distances = (
             torch.sum(z_e_flat ** 2, dim=1, keepdim=True)
             + torch.sum(self.embedding.weight ** 2, dim=1)
             - 2 * torch.matmul(z_e_flat, self.embedding.weight.t())
         )
+
         indices = torch.argmin(distances, dim=1)
         z_q = self.embedding(indices).view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
-        codebook_loss = F.mse_loss(z_q, z_e.detach())
+
+        codebook_loss   = F.mse_loss(z_q, z_e.detach())
         commitment_loss = F.mse_loss(z_e, z_q.detach())
         vq_loss = codebook_loss + self.beta * commitment_loss
 
-        # Straight Through Estimator
+        # Straight-Through Estimator
         z_q = z_e + (z_q - z_e).detach()
         return z_q, codebook_loss, commitment_loss, vq_loss, indices
 
@@ -119,89 +46,86 @@ class VectorQuantizer(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, in_channels):
+    def __init__(self, in_channels, embedding_dim):
         super().__init__()
         self.model = nn.Sequential(
             nn.Conv2d(in_channels, 64, kernel_size=4, stride=(2, 2), padding=1),
             nn.ReLU(),
-            nn.Dropout2d(0.1),  # light dropout early to not destroy low-level features
+            nn.Dropout2d(0.1),
 
             nn.Conv2d(64, 128, kernel_size=4, stride=(2, 1), padding=1),
             nn.ReLU(),
-            nn.Dropout2d(0.2),  # stronger dropout mid-level
+            nn.Dropout2d(0.1),
 
-            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(128, embedding_dim, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.Dropout2d(0.3)   # heaviest dropout before quantization
+            nn.Dropout2d(0.1)
         )
 
     def forward(self, x):
         return self.model(x)
-
-
 
 
 class Decoder(nn.Module):
     def __init__(self, embedding_dim, in_channels=1):
         super().__init__()
         self.model = nn.Sequential(
-            nn.Conv2d(embedding_dim, 128, kernel_size=3, stride=1, padding=1), nn.ReLU(),      # 50×15
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=(2, 1), padding=1), nn.ReLU(),   # 100×15
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=(2, 2), padding=1), nn.ReLU(),    # 200×30
-            nn.Conv2d(32, in_channels, kernel_size=3, stride=1, padding=1)                               # Final: 200×30
+            nn.Conv2d(embedding_dim, 128, kernel_size=3, stride=1, padding=1),      # 50×14 in this pipeline
+            nn.ReLU(),
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=(2, 1), padding=1),   # 100×15
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=(2, 2), padding=1),    # 200×30
+            nn.ReLU(),
+            nn.Conv2d(32, in_channels, kernel_size=3, stride=1, padding=1)          # Final: 200×30
         )
 
     def forward(self, x):
         return self.model(x)
 
-    
 
 class VQVAE(nn.Module):
-    def __init__(self, in_channels=1, embedding_dim=32, num_embeddings=512, beta=0.25,
-                 decay=0.99, cosine_assign=True):
+    def __init__(self, in_channels=1, embedding_dim=64, num_embeddings=128, beta=0.25):
         super().__init__()
-        self.encoder = Encoder(in_channels)          # outputs C_enc=128 in your file
-        C_enc = 128                                  # <- last conv of Encoder uses 128
+        self.in_channels = in_channels
 
-        # map encoder channels -> embedding_dim for the quantizer
-        self.quant_proj = nn.Conv2d(C_enc, embedding_dim, kernel_size=1)
-        self.quant_ln = nn.LayerNorm(embedding_dim)
-
-        # EMA quantizer (make sure args are in the right slots!)
-        self.quantizer = VectorQuantizerEMA(
+        self.encoder = Encoder(in_channels, embedding_dim)
+        self.quantizer = VectorQuantizer(
             num_embeddings=num_embeddings,
             embedding_dim=embedding_dim,
-            decay=decay,
-            eps=1e-5,
-            cosine_assign=cosine_assign,
             beta=beta
         )
-
-        self.decoder = Decoder(embedding_dim, in_channels)        # your Decoder already takes embedding_dim
+        self.decoder = Decoder(embedding_dim, in_channels)
 
     def forward(self, x, quantize=True):
-        z_e = self.encoder(x)                        # (B, C_enc, H, W)
-        z_e = self.quant_proj(z_e)                   # (B, embedding_dim, H, W)
+        input_was_channels_last = False
+        if x.dim() == 4 and x.shape[1] != self.in_channels and x.shape[-1] == self.in_channels:
+            input_was_channels_last = True
+            x_bchw = x.permute(0, 3, 1, 2).contiguous()
+        else:
+            x_bchw = x
 
-        # apply LN over channel dim (B,C,H,W) → (BHW,C) → LN → back
-        B, C, H, W = z_e.shape
-        z_flat = z_e.permute(0, 2, 3, 1).reshape(-1, C)
-        z_flat = self.quant_ln(z_flat)
-        z_e = z_flat.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
+        z_e = self.encoder(x_bchw)
 
         if quantize:
             z_q, codebook_loss, commitment_loss, vq_loss, indices = self.quantizer(z_e)
         else:
-            # warm-up / no-quant path: return zeros as 0-D tensors and indices=None
             z_q = z_e
             indices = None
             codebook_loss   = torch.zeros((), device=z_e.device)
             commitment_loss = torch.zeros((), device=z_e.device)
             vq_loss         = torch.zeros((), device=z_e.device)
 
-        x_recon = self.decoder(z_q)
-        recon_loss = F.mse_loss(x_recon, x)
+        x_recon_bchw = self.decoder(z_q)
+
+        # Compute loss in BCHW space
+        recon_loss = F.mse_loss(x_recon_bchw, x_bchw)
         total_loss = recon_loss + vq_loss
+
+        # [NEW] Return reconstruction in the same layout as input
+        if input_was_channels_last:
+            x_recon = x_recon_bchw.permute(0, 2, 3, 1).contiguous()  # -> (B, H, W, C)
+        else:
+            x_recon = x_recon_bchw
 
         return {
             "recon_x": x_recon,
@@ -234,24 +158,13 @@ def compute_perplexity(indices, num_embeddings):
     return perplexity
 
 
-import numpy as np
-import torch
-from torch.utils.data import Dataset
-
 class ChunkImageDataset(Dataset):
-    """
-    Expects each df in `chunks` to have columns:
-      - 'PWR_ch1' (list/array length T of 200-dim vectors)
-      - optionally 'PWR_ch2', 'PWR_ch3' for extra modalities
-    Produces tensor of shape (C, 200, T), where C = in_channels.
-    """
     def __init__(self, chunks, in_channels=1, transform=None):
         assert in_channels in (1, 2, 3), "in_channels must be 1, 2, or 3"
         self.in_channels = in_channels
         self.data = []
         self.transform = transform
 
-        # pick which columns to read based on in_channels
         cols = ["PWR_ch1"]
         if in_channels >= 2: cols.append("PWR_ch2")
         if in_channels >= 3: cols.append("PWR_ch3")
@@ -264,11 +177,9 @@ class ChunkImageDataset(Dataset):
                     arr = np.stack(df[c].to_list(), axis=1).astype(np.float32)
                 else:
                     # fallback: zero channel if missing
-                    # shape must match first channel time length
                     if len(chans) > 0:
                         T = chans[0].shape[1]
                     else:
-                        # infer T from PWR_ch1
                         base = np.stack(df["PWR_ch1"].to_list(), axis=1).astype(np.float32)
                         T = base.shape[1]
                     arr = np.zeros((200, T), dtype=np.float32)
@@ -285,12 +196,12 @@ class ChunkImageDataset(Dataset):
         x = torch.from_numpy(self.data[idx])  # (C, 200, T), float32
 
         # per-sample, per-channel z-score
-        # keepdims for broadcasting over (200, T)
-        mean = x.mean(dim=(1,2), keepdim=True)
-        std  = x.std(dim=(1,2), keepdim=True)
-        std  = torch.where(std < 1e-6, torch.ones_like(std), std)
-        x = (x - mean) / std
+        mean = x.mean(dim=(1, 2), keepdim=True)
+        std  = x.std(dim=(1, 2), keepdim=True, unbiased=False)
+        x = (x - mean) / (std + 1e-8)                           
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
         if self.transform is not None:
             x = self.transform(x)
+
         return x

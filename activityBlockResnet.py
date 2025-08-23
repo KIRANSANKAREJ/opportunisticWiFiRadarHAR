@@ -155,7 +155,7 @@ class_names = [
     ]
 plt.figure(figsize=(10, 8))
 sns.heatmap(cm_normalized, annot=True, fmt=".2f", cmap="Blues",
-            xticklabels=class_names, yticklabels=class_names)
+            xticklabels=class_names, yticklabels=class_names, cbar=False)
 plt.xlabel("Predicted")
 plt.ylabel("True")
 plt.title("Confusion Matrix (Normalized)")
