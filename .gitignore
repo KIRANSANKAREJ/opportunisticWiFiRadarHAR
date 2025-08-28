@@ -1,6 +1,6 @@
 /pwr
 *.pt
-*.pdf
+/References/
 *.pkl
 /__pycache__
 /images
